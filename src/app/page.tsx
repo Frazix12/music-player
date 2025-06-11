@@ -174,6 +174,8 @@ export default function MusicPlayer() {
 
             if (response.ok) {
                 const data = await response.json();
+                // Debug: log the received metadata
+                console.log("Received metadata from API:", data.metadata);
                 if (data.metadata) {
                     // Update current track with enhanced metadata
                     setTracks((prevTracks) =>
@@ -255,6 +257,8 @@ export default function MusicPlayer() {
 
             if (response.ok) {
                 const data = await response.json();
+                // Debug: log the received lyrics array
+                console.log("Received lyrics from API:", data.lyrics);
                 if (data.lyrics && data.lyrics.length > 0) {
                     setLyrics(data.lyrics);
                     setLyricsSource(data.source);
@@ -298,11 +302,19 @@ export default function MusicPlayer() {
 
     const handleFileUpload = async (files: FileList) => {
         const newTracks: Track[] = [];
+        const fetchMetadataPromises: Promise<void>[] = [];
+        const fetchLyricsPromises: Promise<void>[] = [];
+        const seen = new Set(tracks.map((t) => `${t.title} - ${t.artist}`));
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
             if (file.type === "audio/mpeg" || file.type === "audio/mp3") {
                 const metadata = await extractMetadata(file);
+                const key = `${metadata.title || file.name} - ${
+                    metadata.artist || "Unknown Artist"
+                }`;
+                if (seen.has(key)) continue; // Skip duplicates
+                seen.add(key);
                 const track: Track = {
                     id: Math.random().toString(36).substr(2, 9),
                     file,
@@ -316,6 +328,18 @@ export default function MusicPlayer() {
                         "/placeholder.svg?height=96&width=96",
                 };
                 newTracks.push(track);
+                // Prefetch metadata and lyrics
+                fetchMetadataPromises.push(
+                    fetchMetadata(track.title, track.artist) as Promise<void>
+                );
+                fetchLyricsPromises.push(
+                    fetchLyrics(
+                        track.title,
+                        track.artist,
+                        track.album,
+                        track.duration
+                    ) as Promise<void>
+                );
             }
         }
 
@@ -330,6 +354,9 @@ export default function MusicPlayer() {
         if (!currentTrack && newTracks.length > 0) {
             setCurrentTrack(newTracks[0]);
         }
+
+        // Wait for all metadata and lyrics to be fetched in the background
+        await Promise.all([...fetchMetadataPromises, ...fetchLyricsPromises]);
     };
 
     const handlePlay = () => {

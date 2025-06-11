@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { Client } from "lrclib-api";
+import { SyncLyrics } from "@stef-0012/synclyrics";
 
 interface LyricLine {
     time: number;
@@ -17,44 +17,54 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        const client = new Client();
-        // Use correct Query type for lrclib-api
-        const query = {
-            track_name: title,
-            artist_name: artist,
-            ...(album ? { album_name: album } : {}),
-            ...(duration ? { duration: Number(duration) * 1000 } : {}), // duration in ms
-        };
-
         try {
-            // Get synced lyrics using lrclib-api npm package
-            const syncedLyrics = await client.getSynced(query);
-
-            if (Array.isArray(syncedLyrics) && syncedLyrics.length > 0) {
-                // Convert ms to seconds for your LyricLine interface
-                const lyrics: LyricLine[] = syncedLyrics.map((line) => ({
-                    time: line.startTime ? line.startTime / 1000 : 0,
-                    text: line.text,
-                }));
+            // Fetch lyrics using SyncLyrics
+            const syncLyrics = new SyncLyrics();
+            const lyricsData = await syncLyrics.getLyrics({
+                track: title,
+                artist: artist,
+                album: album,
+                length: duration,
+            });
+            // Prefer line-synced, then plain
+            const lineSynced = lyricsData.lyrics.lineSynced;
+            if (lineSynced && lineSynced.lyrics) {
+                // Debug: log the raw LRC and parsed output
+                console.log("Raw lineSynced.lyrics:", lineSynced.lyrics);
+                const parsedLines = lineSynced.parse(lineSynced.lyrics) || [];
+                console.log("Parsed lines:", parsedLines);
+                // If all times are 0, try to parse manually as fallback
+                let lyrics: LyricLine[] = parsedLines.map(
+                    (line: { time: number; text: string }) => ({
+                        time:
+                            line.time && !isNaN(line.time)
+                                ? line.time // FIX: do not divide by 1000, already in seconds
+                                : 0,
+                        text: line.text,
+                    })
+                );
+                const allZero = lyrics.every((l) => l.time === 0);
+                if (allZero) {
+                    // Try manual LRC parsing as fallback
+                    lyrics = parseLRC(lineSynced.lyrics);
+                }
                 return NextResponse.json({
                     lyrics,
-                    source: "lrclib",
+                    source: "synclyrics",
                 });
             }
-
-            // Fallback to unsynced/plain lyrics
-            const unsyncedLyrics = await client.getUnsynced(query);
-            if (Array.isArray(unsyncedLyrics) && unsyncedLyrics.length > 0) {
+            // Fallback to plain lyrics
+            const plain = lyricsData.lyrics.plain;
+            if (plain && plain.lyrics) {
                 const lyrics = convertPlainToTimedLyrics(
-                    unsyncedLyrics.map((l) => l.text).join("\n"),
+                    plain.lyrics,
                     duration ? Number(duration) : 180
                 );
                 return NextResponse.json({
                     lyrics,
-                    source: "lrclib_plain",
+                    source: "synclyrics_plain",
                 });
             }
-
             // No lyrics found
             return NextResponse.json({
                 lyrics: generateFallbackLyrics(title, artist),
@@ -62,11 +72,11 @@ export async function POST(request: NextRequest) {
                 message: "No lyrics available for this track",
             });
         } catch (fetchError) {
-            console.error("LRCLIB fetch error:", fetchError);
+            console.error("SyncLyrics fetch error:", fetchError);
             return NextResponse.json({
                 lyrics: generateFallbackLyrics(title, artist),
                 source: "fallback",
-                error: `LRCLIB unavailable: ${
+                error: `SyncLyrics unavailable: ${
                     fetchError instanceof Error
                         ? fetchError.message
                         : String(fetchError)
@@ -121,4 +131,27 @@ function generateFallbackLyrics(title: string, artist: string): LyricLine[] {
         { time: 42, text: "" },
         { time: 45, text: "🎵 Enjoy the music 🎵" },
     ];
+}
+
+// Manual LRC parser fallback
+function parseLRC(lrc: string): LyricLine[] {
+    const lines = lrc.split(/\r?\n/);
+    const result: LyricLine[] = [];
+    const timeTag = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
+    for (const line of lines) {
+        let match: RegExpExecArray | null;
+        let text = line;
+        let lastIndex = 0;
+        while ((match = timeTag.exec(line)) !== null) {
+            const min = parseInt(match[1], 10);
+            const sec = parseInt(match[2], 10);
+            const ms = match[3] ? parseInt(match[3].padEnd(3, "0"), 10) : 0;
+            const time = min * 60 + sec + ms / 1000;
+            lastIndex = timeTag.lastIndex;
+            text = line.slice(lastIndex).trim();
+            result.push({ time, text });
+        }
+    }
+    // Sort by time
+    return result.sort((a, b) => a.time - b.time);
 }
