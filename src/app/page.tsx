@@ -302,19 +302,11 @@ export default function MusicPlayer() {
 
     const handleFileUpload = async (files: FileList) => {
         const newTracks: Track[] = [];
-        const fetchMetadataPromises: Promise<void>[] = [];
-        const fetchLyricsPromises: Promise<void>[] = [];
-        const seen = new Set(tracks.map((t) => `${t.title} - ${t.artist}`));
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
             if (file.type === "audio/mpeg" || file.type === "audio/mp3") {
                 const metadata = await extractMetadata(file);
-                const key = `${metadata.title || file.name} - ${
-                    metadata.artist || "Unknown Artist"
-                }`;
-                if (seen.has(key)) continue; // Skip duplicates
-                seen.add(key);
                 const track: Track = {
                     id: Math.random().toString(36).substr(2, 9),
                     file,
@@ -328,18 +320,6 @@ export default function MusicPlayer() {
                         "/placeholder.svg?height=96&width=96",
                 };
                 newTracks.push(track);
-                // Prefetch metadata and lyrics
-                fetchMetadataPromises.push(
-                    fetchMetadata(track.title, track.artist) as Promise<void>
-                );
-                fetchLyricsPromises.push(
-                    fetchLyrics(
-                        track.title,
-                        track.artist,
-                        track.album,
-                        track.duration
-                    ) as Promise<void>
-                );
             }
         }
 
@@ -354,9 +334,6 @@ export default function MusicPlayer() {
         if (!currentTrack && newTracks.length > 0) {
             setCurrentTrack(newTracks[0]);
         }
-
-        // Wait for all metadata and lyrics to be fetched in the background
-        await Promise.all([...fetchMetadataPromises, ...fetchLyricsPromises]);
     };
 
     const handlePlay = () => {
@@ -426,9 +403,16 @@ export default function MusicPlayer() {
         return `${minutes}:${seconds.toString().padStart(2, "0")}`;
     };
 
-    const progress = currentTrack
-        ? (currentTime / currentTrack.duration) * 100
-        : 0;
+    // Robust progress calculation
+    const progress =
+        currentTrack &&
+        currentTrack.duration > 0 &&
+        !isNaN(currentTrack.duration)
+            ? Math.min(
+                  100,
+                  Math.max(0, (currentTime / currentTrack.duration) * 100)
+              )
+            : 0;
 
     // Fullscreen Lyrics Component
     const FullscreenLyrics = () => (
@@ -642,12 +626,19 @@ export default function MusicPlayer() {
                                                 ]);
                                             }}
                                         >
-                                            <div
-                                                className="absolute top-0 left-0 h-full progress-bar rounded-full transition-all duration-100"
-                                                style={{
-                                                    width: `${progress}%`,
-                                                }}
-                                            />
+                                            {/* Show loading shimmer if duration is missing or zero */}
+                                            {!currentTrack.duration ||
+                                            isNaN(currentTrack.duration) ||
+                                            currentTrack.duration === 0 ? (
+                                                <div className="absolute top-0 left-0 h-full w-full bg-gradient-to-r from-primary/20 via-primary/40 to-primary/20 animate-pulse rounded-full" />
+                                            ) : (
+                                                <div
+                                                    className="absolute top-0 left-0 h-full progress-bar rounded-full transition-all duration-100"
+                                                    style={{
+                                                        width: `${progress}%`,
+                                                    }}
+                                                />
+                                            )}
                                         </div>
                                         <div className="flex justify-between text-sm text-muted-foreground mt-3">
                                             <span className="font-mono">
