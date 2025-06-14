@@ -1,4 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
+import db from "@/lib/db";
+import crypto from "crypto";
 
 interface TrackMetadata {
     title: string;
@@ -18,6 +20,20 @@ export async function POST(request: NextRequest) {
                 { error: "Title and artist are required" },
                 { status: 400 }
             );
+        }
+        // Use a deterministic ID for deduplication (title-artist)
+        const id = crypto
+            .createHash("sha256")
+            .update(`${title}::${artist}`)
+            .digest("hex");
+        // Try to get from DB first
+        const row = db.prepare("SELECT * FROM tracks WHERE id = ?").get(id);
+        if (row) {
+            // Return cached metadata
+            return NextResponse.json({
+                metadata: row,
+                source: "sqlite-cache",
+            });
         }
         // Search MusicBrainz for recording
         const query = `recording:"${title}" AND artist:"${artist}"`;
@@ -80,6 +96,19 @@ export async function POST(request: NextRequest) {
                     }
                 }
             }
+            // Save to DB for future requests
+            db.prepare(
+                `INSERT OR REPLACE INTO tracks (id, title, artist, album, duration, releaseDate, coverArtUrl, musicbrainzId) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
+            ).run(
+                id,
+                metadata.title,
+                metadata.artist,
+                metadata.album,
+                metadata.duration,
+                metadata.releaseDate,
+                metadata.coverArtUrl,
+                metadata.musicbrainzId
+            );
             return NextResponse.json({
                 metadata,
                 source: "musicbrainz",

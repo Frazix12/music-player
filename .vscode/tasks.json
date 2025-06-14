@@ -1,0 +1,11 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "Install better-sqlite3",
+            "command": "npm install better-sqlite3",
+            "group": "build"
+        }
+    ]
+}

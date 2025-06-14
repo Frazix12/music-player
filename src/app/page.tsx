@@ -1,6 +1,7 @@
 "use client";
+import Image from "next/image";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
     Upload,
     Play,
@@ -56,7 +57,6 @@ export default function MusicPlayer() {
     const [metadataFetched, setMetadataFetched] = useState<Set<string>>(
         new Set()
     );
-    const [lyricsFetched, setLyricsFetched] = useState<Set<string>>(new Set());
     const [hasUploadedTracks, setHasUploadedTracks] = useState(false);
     const [showLyrics, setShowLyrics] = useState(true);
     const [isFullscreenLyrics, setIsFullscreenLyrics] = useState(false);
@@ -64,26 +64,159 @@ export default function MusicPlayer() {
     const audioRef = useRef<HTMLAudioElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    useEffect(() => {
-        if (currentTrack) {
-            const trackKey = `${currentTrack.title}-${currentTrack.artist}`;
-
-            // Only fetch metadata if we haven't already tried for this track
-            if (!metadataFetched.has(trackKey)) {
-                fetchMetadata(currentTrack.title, currentTrack.artist);
+    // Memoized fetchMetadata to avoid unnecessary re-creations
+    const fetchMetadata = useCallback(
+        async (title: string, artist: string) => {
+            const trackKey = `${title}-${artist}`;
+            setMetadataFetched((prev) => new Set(prev).add(trackKey));
+            try {
+                setIsLoadingMetadata(true);
+                const response = await fetch("/api/metadata", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ title, artist }),
+                });
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log("Received metadata from API:", data.metadata);
+                    if (data.metadata) {
+                        setTracks((prevTracks) =>
+                            prevTracks.map((track) =>
+                                track.id === currentTrack?.id
+                                    ? {
+                                          ...track,
+                                          title:
+                                              data.metadata.title ||
+                                              track.title,
+                                          artist:
+                                              data.metadata.artist ||
+                                              track.artist,
+                                          album:
+                                              data.metadata.album ||
+                                              track.album,
+                                          albumArt:
+                                              data.metadata.coverArtUrl ||
+                                              track.albumArt,
+                                          releaseDate:
+                                              data.metadata.releaseDate,
+                                          musicbrainzId:
+                                              data.metadata.musicbrainzId,
+                                      }
+                                    : track
+                            )
+                        );
+                        if (currentTrack) {
+                            setCurrentTrack((prev) =>
+                                prev
+                                    ? {
+                                          ...prev,
+                                          title:
+                                              data.metadata.title || prev.title,
+                                          artist:
+                                              data.metadata.artist ||
+                                              prev.artist,
+                                          album:
+                                              data.metadata.album || prev.album,
+                                          albumArt:
+                                              data.metadata.coverArtUrl ||
+                                              prev.albumArt,
+                                          releaseDate:
+                                              data.metadata.releaseDate,
+                                          musicbrainzId:
+                                              data.metadata.musicbrainzId,
+                                      }
+                                    : null
+                            );
+                        }
+                    }
+                } else {
+                    console.error("Metadata API failed:", response.status);
+                }
+            } catch (error) {
+                console.error("Failed to fetch metadata (background):", error);
+            } finally {
+                setIsLoadingMetadata(false);
             }
+        },
+        [currentTrack]
+    );
 
-            // Only fetch lyrics if we haven't already tried for this track
-            if (!lyricsFetched.has(trackKey)) {
-                fetchLyrics(
-                    currentTrack.title,
-                    currentTrack.artist,
-                    currentTrack.album,
-                    currentTrack.duration
+    // Memoized fetchLyrics to avoid unnecessary re-creations
+    const fetchLyrics = useCallback(
+        async (
+            title: string,
+            artist: string,
+            album?: string,
+            duration?: number
+        ) => {
+            try {
+                setIsLoadingLyrics(true);
+                setLyrics([]);
+                setCurrentLyricIndex(-1);
+                setLyricsSource("");
+                setLyricsError(null);
+                const response = await fetch("/api/lyrics", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ title, artist, album, duration }),
+                });
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log("Received lyrics from API:", data.lyrics);
+                    if (data.lyrics && data.lyrics.length > 0) {
+                        setLyrics(data.lyrics);
+                        setLyricsSource(data.source);
+                        if (data.error) setLyricsError(data.error);
+                    } else {
+                        setLyrics([]);
+                        setLyricsSource(data.source || "not_found");
+                        if (data.error) setLyricsError(data.error);
+                    }
+                } else {
+                    console.error("Lyrics API failed:", response.status);
+                    setLyrics([
+                        { time: 0, text: `♪ ${title} ♪` },
+                        { time: 2, text: `by ${artist}` },
+                        { time: 5, text: "Lyrics could not be loaded" },
+                        { time: 8, text: "Enjoy the music!" },
+                    ]);
+                    setLyricsSource("error");
+                    setLyricsError("API request failed");
+                }
+            } catch (error) {
+                console.error("Failed to fetch lyrics (background):", error);
+                setLyrics([
+                    { time: 0, text: `♪ ${title} ♪` },
+                    { time: 2, text: `by ${artist}` },
+                    { time: 5, text: "Lyrics could not be loaded" },
+                    { time: 8, text: "Enjoy the music!" },
+                ]);
+                setLyricsSource("error");
+                setLyricsError(
+                    error instanceof Error ? error.message : String(error)
                 );
+            } finally {
+                setIsLoadingLyrics(false);
             }
+        },
+        []
+    );
+
+    // Memoize handleNext to fix dependency issues
+    const handleNext = useCallback(() => {
+        if (!currentTrack || tracks.length === 0) return;
+        const currentIndex = tracks.findIndex((t) => t.id === currentTrack.id);
+        let nextIndex;
+        if (repeatMode === "one") {
+            nextIndex = currentIndex;
+        } else if (isShuffled) {
+            nextIndex = Math.floor(Math.random() * tracks.length);
+        } else {
+            nextIndex = (currentIndex + 1) % tracks.length;
         }
-    }, [currentTrack]);
+        setCurrentTrack(tracks[nextIndex]);
+        setIsPlaying(true);
+    }, [currentTrack, tracks, repeatMode, isShuffled]);
 
     useEffect(() => {
         const audio = audioRef.current;
@@ -99,7 +232,7 @@ export default function MusicPlayer() {
             audio.removeEventListener("timeupdate", updateTime);
             audio.removeEventListener("ended", handleEnded);
         };
-    }, [currentTrack, repeatMode, isShuffled]);
+    }, [currentTrack, repeatMode, isShuffled, handleNext]);
 
     useEffect(() => {
         // Update current lyric based on time with more precise matching
@@ -125,18 +258,54 @@ export default function MusicPlayer() {
         return () => document.removeEventListener("keydown", handleEscape);
     }, [isFullscreenLyrics]);
 
+    // Preload metadata and lyrics for all tracks as soon as tracks are uploaded or changed, but do NOT change the current track or playback state
+    useEffect(() => {
+        if (tracks.length > 0) {
+            tracks.forEach((track) => {
+                const trackKey = `${track.title}-${track.artist}`;
+                if (!metadataFetched.has(trackKey)) {
+                    fetchMetadata(track.title, track.artist);
+                }
+                // Always refresh lyrics for each song
+                fetchLyrics(
+                    track.title,
+                    track.artist,
+                    track.album,
+                    track.duration
+                );
+            });
+        }
+    }, [tracks, metadataFetched, fetchMetadata, fetchLyrics]);
+
+    // When a song starts playing or the currentTrack changes (including after next/previous), re-fetch lyrics to ensure they are correct for the current track
+    useEffect(() => {
+        if (currentTrack && isPlaying) {
+            setLyricsSource("");
+            setLyricsError(null);
+            fetchLyrics(
+                currentTrack.title,
+                currentTrack.artist,
+                currentTrack.album,
+                currentTrack.duration
+            );
+        }
+    }, [currentTrack, isPlaying, fetchLyrics]);
+
+    // Extract metadata from filename and audio duration only (no jsmediatags)
     const extractMetadata = async (file: File): Promise<Partial<Track>> => {
         return new Promise((resolve) => {
             const audio = new Audio();
             audio.src = URL.createObjectURL(file);
 
             audio.addEventListener("loadedmetadata", () => {
-                // Try to extract metadata from filename
                 const filename = file.name.replace(/\.[^/.]+$/, "");
                 let title = filename;
                 let artist = "Unknown Artist";
+                const album = "Unknown Album";
+                const duration = audio.duration;
+                const albumArt: string | undefined = undefined;
 
-                // Common patterns: "Artist - Title" or "Title - Artist"
+                // Parse filename for common patterns: "Artist - Title" or "Title - Artist"
                 if (filename.includes(" - ")) {
                     const parts = filename.split(" - ");
                     if (parts.length >= 2) {
@@ -145,195 +314,76 @@ export default function MusicPlayer() {
                     }
                 }
 
-                resolve({
-                    title,
-                    artist,
-                    album: "Unknown Album",
-                    duration: audio.duration,
-                });
+                resolve({ title, artist, album, duration, albumArt });
             });
         });
     };
 
-    const fetchMetadata = async (title: string, artist: string) => {
-        const trackKey = `${title}-${artist}`;
-
-        // Mark as being fetched to prevent duplicate calls
-        setMetadataFetched((prev) => new Set(prev).add(trackKey));
-
-        try {
-            setIsLoadingMetadata(true);
-
-            const response = await fetch("/api/metadata", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ title, artist }),
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                // Debug: log the received metadata
-                console.log("Received metadata from API:", data.metadata);
-                if (data.metadata) {
-                    // Update current track with enhanced metadata
-                    setTracks((prevTracks) =>
-                        prevTracks.map((track) =>
-                            track.id === currentTrack?.id
-                                ? {
-                                      ...track,
-                                      title: data.metadata.title || track.title,
-                                      artist:
-                                          data.metadata.artist || track.artist,
-                                      album: data.metadata.album || track.album,
-                                      albumArt:
-                                          data.metadata.coverArtUrl ||
-                                          track.albumArt,
-                                      releaseDate: data.metadata.releaseDate,
-                                      musicbrainzId:
-                                          data.metadata.musicbrainzId,
-                                  }
-                                : track
-                        )
-                    );
-
-                    // Update current track reference
-                    if (currentTrack) {
-                        setCurrentTrack((prev) =>
-                            prev
-                                ? {
-                                      ...prev,
-                                      title: data.metadata.title || prev.title,
-                                      artist:
-                                          data.metadata.artist || prev.artist,
-                                      album: data.metadata.album || prev.album,
-                                      albumArt:
-                                          data.metadata.coverArtUrl ||
-                                          prev.albumArt,
-                                      releaseDate: data.metadata.releaseDate,
-                                      musicbrainzId:
-                                          data.metadata.musicbrainzId,
-                                  }
-                                : null
-                        );
-                    }
-                }
-            } else {
-                console.error("Metadata API failed:", response.status);
-            }
-        } catch (error) {
-            console.error("Failed to fetch metadata:", error);
-        } finally {
-            setIsLoadingMetadata(false);
-        }
-    };
-
-    const fetchLyrics = async (
-        title: string,
-        artist: string,
-        album?: string,
-        duration?: number
-    ) => {
-        const trackKey = `${title}-${artist}`;
-
-        // Mark as being fetched to prevent duplicate calls
-        setLyricsFetched((prev) => new Set(prev).add(trackKey));
-
-        try {
-            setIsLoadingLyrics(true);
-            setLyrics([]);
-            setCurrentLyricIndex(-1);
-            setLyricsSource("");
-            setLyricsError(null);
-
-            const response = await fetch("/api/lyrics", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ title, artist, album, duration }),
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                // Debug: log the received lyrics array
-                console.log("Received lyrics from API:", data.lyrics);
-                if (data.lyrics && data.lyrics.length > 0) {
-                    setLyrics(data.lyrics);
-                    setLyricsSource(data.source);
-                    if (data.error) {
-                        setLyricsError(data.error);
-                    }
-                } else {
-                    setLyrics([]);
-                    setLyricsSource(data.source || "not_found");
-                    if (data.error) {
-                        setLyricsError(data.error);
-                    }
-                }
-            } else {
-                console.error("Lyrics API failed:", response.status);
-                setLyrics([
-                    { time: 0, text: `♪ ${title} ♪` },
-                    { time: 2, text: `by ${artist}` },
-                    { time: 5, text: "Lyrics could not be loaded" },
-                    { time: 8, text: "Enjoy the music!" },
-                ]);
-                setLyricsSource("error");
-                setLyricsError("API request failed");
-            }
-        } catch (error) {
-            console.error("Failed to fetch lyrics:", error);
-            setLyrics([
-                { time: 0, text: `♪ ${title} ♪` },
-                { time: 2, text: `by ${artist}` },
-                { time: 5, text: "Lyrics could not be loaded" },
-                { time: 8, text: "Enjoy the music!" },
-            ]);
-            setLyricsSource("error");
-            setLyricsError(
-                error instanceof Error ? error.message : String(error)
-            );
-        } finally {
-            setIsLoadingLyrics(false);
-        }
+    const getDeterministicId = async (file: File) => {
+        // Use Web Crypto API in browser
+        const data = new TextEncoder().encode(
+            file.name + file.size + file.lastModified
+        );
+        const hashBuffer = await window.crypto.subtle.digest("SHA-256", data);
+        return Array.from(new Uint8Array(hashBuffer))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
     };
 
     const handleFileUpload = async (files: FileList) => {
         const newTracks: Track[] = [];
-
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
             if (file.type === "audio/mpeg" || file.type === "audio/mp3") {
                 const metadata = await extractMetadata(file);
+                let finalMetadata = { ...metadata };
+                if (!metadata.title || !metadata.artist || !metadata.album) {
+                    const response = await fetch("/api/metadata", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            title: metadata.title || file.name,
+                            artist: metadata.artist || "Unknown Artist",
+                        }),
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        finalMetadata = {
+                            ...finalMetadata,
+                            title: finalMetadata.title || data.metadata.title,
+                            artist:
+                                finalMetadata.artist || data.metadata.artist,
+                            album: finalMetadata.album || data.metadata.album,
+                            albumArt:
+                                finalMetadata.albumArt ||
+                                data.metadata.coverArtUrl,
+                            duration:
+                                finalMetadata.duration ||
+                                data.metadata.duration,
+                        };
+                    }
+                }
+                const id = await getDeterministicId(file);
                 const track: Track = {
-                    id: Math.random().toString(36).substr(2, 9),
+                    id,
                     file,
                     url: URL.createObjectURL(file),
-                    title: metadata.title || file.name,
-                    artist: metadata.artist || "Unknown Artist",
-                    album: metadata.album || "Unknown Album",
-                    duration: metadata.duration || 0,
+                    title: finalMetadata.title || file.name,
+                    artist: finalMetadata.artist || "Unknown Artist",
+                    album: finalMetadata.album || "Unknown Album",
+                    duration: finalMetadata.duration || 0,
                     albumArt:
-                        metadata.albumArt ||
+                        finalMetadata.albumArt ||
                         "/placeholder.svg?height=96&width=96",
                 };
                 newTracks.push(track);
             }
         }
-
         setTracks((prev) => [...prev, ...newTracks]);
-
-        // Mark that tracks have been uploaded
         if (newTracks.length > 0) {
             setHasUploadedTracks(true);
         }
-
-        // Auto-play first track if no track is currently selected
-        if (!currentTrack && newTracks.length > 0) {
-            setCurrentTrack(newTracks[0]);
-        }
+        // Do NOT auto-play or auto-select a track here
     };
 
     const handlePlay = () => {
@@ -347,23 +397,7 @@ export default function MusicPlayer() {
         }
     };
 
-    const handleNext = () => {
-        if (!currentTrack || tracks.length === 0) return;
-
-        const currentIndex = tracks.findIndex((t) => t.id === currentTrack.id);
-        let nextIndex;
-
-        if (repeatMode === "one") {
-            nextIndex = currentIndex;
-        } else if (isShuffled) {
-            nextIndex = Math.floor(Math.random() * tracks.length);
-        } else {
-            nextIndex = (currentIndex + 1) % tracks.length;
-        }
-
-        setCurrentTrack(tracks[nextIndex]);
-        setIsPlaying(true);
-    };
+    // Removed duplicate handleNext function to avoid redeclaration error.
 
     const handlePrevious = () => {
         if (!currentTrack || tracks.length === 0) return;
@@ -403,17 +437,6 @@ export default function MusicPlayer() {
         return `${minutes}:${seconds.toString().padStart(2, "0")}`;
     };
 
-    // Robust progress calculation
-    const progress =
-        currentTrack &&
-        currentTrack.duration > 0 &&
-        !isNaN(currentTrack.duration)
-            ? Math.min(
-                  100,
-                  Math.max(0, (currentTime / currentTrack.duration) * 100)
-              )
-            : 0;
-
     // Fullscreen Lyrics Component
     const FullscreenLyrics = () => (
         <div className="fixed inset-0 z-50 bg-background/95 backdrop-blur-lg flex flex-col">
@@ -423,13 +446,18 @@ export default function MusicPlayer() {
                     {currentTrack && (
                         <>
                             <div className="w-12 h-12 rounded-lg bg-muted flex items-center justify-center overflow-hidden">
-                                <img
+                                <Image
                                     src={
                                         currentTrack.albumArt ||
                                         "/placeholder.svg?height=48&width=48"
                                     }
                                     alt={currentTrack.album}
                                     className="w-full h-full object-cover"
+                                    width={48}
+                                    height={48}
+                                    unoptimized={currentTrack.albumArt?.startsWith(
+                                        "blob:"
+                                    )}
                                 />
                             </div>
                             <div>
@@ -454,7 +482,7 @@ export default function MusicPlayer() {
             </div>
 
             {/* Fullscreen Lyrics Content */}
-            <div className="flex-1 overflow-hidden">
+            <div className="flex-1 overflow-y-auto">
                 <LyricsDisplay
                     lyrics={lyrics}
                     currentTime={currentTime}
@@ -463,12 +491,8 @@ export default function MusicPlayer() {
                     trackArtist={currentTrack?.artist}
                     onRefreshLyrics={() => {
                         if (currentTrack) {
-                            const trackKey = `${currentTrack.title}-${currentTrack.artist}`;
-                            setLyricsFetched((prev) => {
-                                const newSet = new Set(prev);
-                                newSet.delete(trackKey);
-                                return newSet;
-                            });
+                            setLyricsSource("");
+                            setLyricsError(null);
                             fetchLyrics(
                                 currentTrack.title,
                                 currentTrack.artist,
@@ -573,17 +597,18 @@ export default function MusicPlayer() {
                                                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
                                                 </div>
                                             )}
-                                            <img
+                                            <Image
                                                 src={
                                                     currentTrack.albumArt ||
                                                     "/placeholder.svg?height=112&width=112"
                                                 }
                                                 alt={currentTrack.album}
                                                 className="w-full h-full object-cover"
-                                                onError={(e) => {
-                                                    e.currentTarget.src =
-                                                        "/placeholder.svg?height=112&width=112";
-                                                }}
+                                                width={112}
+                                                height={112}
+                                                unoptimized={currentTrack.albumArt?.startsWith(
+                                                    "blob:"
+                                                )}
                                             />
                                         </div>
                                         <div className="flex-1">
@@ -633,9 +658,19 @@ export default function MusicPlayer() {
                                                 <div className="absolute top-0 left-0 h-full w-full bg-gradient-to-r from-primary/20 via-primary/40 to-primary/20 animate-pulse rounded-full" />
                                             ) : (
                                                 <div
-                                                    className="absolute top-0 left-0 h-full progress-bar rounded-full transition-all duration-100"
+                                                    className="absolute top-0 left-0 h-full rounded-full transition-all duration-200"
                                                     style={{
-                                                        width: `${progress}%`,
+                                                        width: `${Math.max(
+                                                            0,
+                                                            Math.min(
+                                                                100,
+                                                                (currentTime /
+                                                                    currentTrack.duration) *
+                                                                    100
+                                                            )
+                                                        )}%`,
+                                                        background:
+                                                            "var(--primary, #6366f1)",
                                                     }}
                                                 />
                                             )}
@@ -773,14 +808,8 @@ export default function MusicPlayer() {
                                             trackArtist={currentTrack?.artist}
                                             onRefreshLyrics={() => {
                                                 if (currentTrack) {
-                                                    const trackKey = `${currentTrack.title}-${currentTrack.artist}`;
-                                                    setLyricsFetched((prev) => {
-                                                        const newSet = new Set(
-                                                            prev
-                                                        );
-                                                        newSet.delete(trackKey);
-                                                        return newSet;
-                                                    });
+                                                    setLyricsSource("");
+                                                    setLyricsError(null);
                                                     fetchLyrics(
                                                         currentTrack.title,
                                                         currentTrack.artist,
